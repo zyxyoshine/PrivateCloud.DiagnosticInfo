@@ -710,6 +710,26 @@ function Start-CopyJob(
     }
 }
 
+
+#
+# Goes over a list of nodes and finds the first one that can access the cluster
+# if none of them can access the cluster it returns nothing
+#
+
+function Get-ClusterAccessNode(
+	[string[]] $Nodes
+)
+{
+	for ($i = 0; $i -lt $Nodes.count; $i++)
+	{
+		$Cluster = Get-Cluster $Nodes.Name -ErrorAction SilentlyContinue
+		if ($Cluster -ne $null)
+		{
+			return $Nodes.Name
+		}
+	}
+}
+
 #
 # Makes a list of cluster nodes or equivalent property-containing objects (Name/State)
 # Optionally filtered for if they are physically responding v. cluster visible state.
@@ -721,49 +741,115 @@ function Get-NodeList(
     [switch] $Filter
 )
 {
-    $FilteredNodes = @()
     $NodesToPing = @()
+	$SuccesfullyPingedNodes = @()
+	$NodesToReturn = @()
 
     if ($Nodes.Count) {
-        $NodesToPing += $Nodes |% { New-Object -TypeName PSObject -Property @{ "Name" = $_; "State" = "Up" }}
-    } else {
-
-        foreach ($node in (Get-ClusterNode -Cluster $Cluster)) {
-
-            if ($node.State -ne "Down") {
-                $FilteredNodes += $node
-            } else {
-                $NodesToPing += $node
-            }
-        }
+        $NodesToPing += $Nodes |% { New-Object -TypeName PSObject -Property @{ "Name" = $_; "State" = "Down"; "Type" = "Machine" }}
     }
+	
+	
+	# Now try to contact the cluster - first via name then by every name from $Nodes.Count above if that fails, until we succesfully contact cluster
+	# Add any nodes missing from $NodesToPing / Replace objects in the list with their real objects 
+	$ClusterNodes = $null
+	
+	if ($Cluster -ne "" -and $Cluster -ne $null)
+	{
+		$ClusterNodes = Get-ClusterNode -Cluster $Cluster -ErrorAction SilentlyContinue
+	}
+	
+	$NodeIdx = 0;
+	while ($ClusterNodes -eq $null -and $NodeIdx -lt $NodesToPing.Count)
+	{
+		# we failed to get it, iterate through the nodes 
+		$ClusterNodes = Get-ClusterNode -Cluster $NodesToPing[$NodeIdx].Name -ErrorAction SilentlyContinue
+		
+		$NodeIdx++
+	}
+	
+	if ($ClusterNodes -ne $null)
+	{
+		if ($Nodes.Count)
+		{
+			# Replace their objects if found, add to list otherwise
+			for ($i = 0; $i -lt $ClusterNodes.Count; $i++)
+			{
+				$found = $false
+				
+				for ($j = 0; $j -lt $NodesToPing.Count; $j++)
+				{
+					if ($NodesToPing[$j].Name -eq $ClusterNodes[$i].Name)
+					{
+						$NodesToPing[$j] = $ClusterNodes[$i]
+						$found = $true
+						break
+					}
+				}
+				
+				if ($found -ne $true)
+				{
+					$NodesToPing += @($ClusterNodes[$i])
+				}
+			}
+		}
+		else
+		{
+			$NodesToPing = $ClusterNodes 
+		}
+	}
+    
+	
+	# Try to ping the nodes 
 
+	if ($NodesToPing.Count) {
+
+		$PingResults = @()
+		# Test-NetConnection is ~3s. Parallelize for the sake of larger clusters/lists of nodes.
+		$j = $NodesToPing |% {
+
+			Start-Job -ArgumentList $_ {
+				param( $Node )
+				if (Test-Connection -ComputerName $Node.Name -Quiet) {
+					$Node
+				}
+			}
+		}
+
+		$null = Wait-Job $j
+		$PingResults += $j | Receive-Job
+		$j | Remove-Job
+		
+		# For any notes that are "fake objects" (Type=Machine instead of Type=Node) mark them up
+		# Copy from NodesToPing to SuccesfullyPingedNodes if they're contained in PingResults
+		# Doing this because the job mutates the object 
+		for ($i = 0; $i -lt $PingResults.Count; $i++)
+		{ 				
+			for ($j = 0; $j -lt $NodesToPing.Count; $j++)
+			{
+				if ($NodesToPing[$j].Name -eq $PingResults[$i].Name)
+				{
+					if ($NodesToPing[$j].Type -eq "Machine")
+					{
+						$NodesToPing[$j].State = "Up"
+					}
+					
+					$SuccesfullyPingedNodes += @($NodesToPing[$j])
+				}
+			}		
+		}
+		
+	}
+	
     if ($Filter) {
-
-        if ($NodesToPing.Count) {
-
-            # Test-NetConnection is ~3s. Parallelize for the sake of larger clusters/lists of nodes.
-            $j = $NodesToPing |% {
-
-                Start-Job -ArgumentList $_ {
-                    param( $Node )
-                    if (Test-Connection -ComputerName $Node.Name -Quiet) {
-                        $Node
-                    }
-                }
-            }
-
-            $null = Wait-Job $j
-            $FilteredNodes += $j | Receive-Job
-            $j | Remove-Job
-        }
+		$NodesToReturn = $SuccesfullyPingedNodes
     } else {
-
         # unfiltered, return all
-        $FilteredNodes += $NodesToPing
+        $NodesToReturn = $NodesToPing
     }
+	
 
-    return $FilteredNodes
+    return $NodesToReturn
 }
 
 <##################################################
@@ -1256,7 +1342,12 @@ function Get-SddcDiagnosticInfo
 
         $NodeList = Get-NodeList -Cluster $ClusterName -Filter
 
-        $AccessNode = $NodeList[0].Name + "." + (Get-Cluster -Name $ClusterName).Domain
+        $AccessNode = Get-ClusterAccessNode $NodeList 
+		
+		if ($AccessNode -ne $null)
+		{
+			$AccessNode = $AccessNode + "." + (Get-Cluster -Name $AccessNode).Domain
+		}
 
         try { $Volumes = Get-Volume -CimSession $AccessNode  }
         catch { Show-Error("Unable to get Volumes. `nError="+$_.Exception.Message) }
@@ -1446,7 +1537,7 @@ function Get-SddcDiagnosticInfo
         catch { Show-Error "Unable to get filtered Cluster Nodes for gathering" $_ }
 
         # use a filtered node as the access node
-        $AccessNode = $ClusterNodes[0].Name
+        $AccessNode = Get-ClusterAccessNode $NodeList 
 
         #
         # Get-Cluster
