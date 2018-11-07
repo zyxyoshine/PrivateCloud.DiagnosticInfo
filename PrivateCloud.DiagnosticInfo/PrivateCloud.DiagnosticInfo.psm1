@@ -717,15 +717,15 @@ function Start-CopyJob(
 #
 
 function Get-ClusterAccessNode(
-	[string[]] $Nodes
+	$Nodes
 )
 {
 	for ($i = 0; $i -lt $Nodes.count; $i++)
 	{
-		$Cluster = Get-Cluster $Nodes.Name -ErrorAction SilentlyContinue
+		$Cluster = Get-Cluster $Nodes[$i].Name -ErrorAction SilentlyContinue
 		if ($Cluster -ne $null)
 		{
-			return $Nodes.Name
+			return $Nodes[$i].Name
 		}
 	}
 }
@@ -1537,7 +1537,7 @@ function Get-SddcDiagnosticInfo
         catch { Show-Error "Unable to get filtered Cluster Nodes for gathering" $_ }
 
         # use a filtered node as the access node
-        $AccessNode = Get-ClusterAccessNode $NodeList 
+        $AccessNode = Get-ClusterAccessNode $ClusterNodes 
 
         #
         # Get-Cluster
@@ -1575,6 +1575,7 @@ function Get-SddcDiagnosticInfo
 
             Write-Host "Cluster name               : Unavailable, Cluster is not online on any node"
         }
+		Write-Host ("Accessible Node List	   : " + [string]::Join(", ",$ClusterNodes.name))
         Write-Host "Access node                : $AccessNode`n"
 
         # Create node-specific directories for content
@@ -1683,7 +1684,7 @@ function Get-SddcDiagnosticInfo
             }
         }
 
-        if ($ClusterName.Length) {
+        if ($AccessNode) {
 
             Show-Update "Start gather of cluster configuration ..."
 
