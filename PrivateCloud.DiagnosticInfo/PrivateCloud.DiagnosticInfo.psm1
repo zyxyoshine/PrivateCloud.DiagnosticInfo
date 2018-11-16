@@ -746,7 +746,7 @@ function Get-NodeList(
 	$NodesToReturn = @()
 
     if ($Nodes.Count) {
-        $NodesToPing += $Nodes |% { New-Object -TypeName PSObject -Property @{ "Name" = $_; "State" = "Down"; "Type" = "Machine" }}
+        $NodesToPing += $Nodes |% { New-Object -TypeName PSObject -Property @{ "Name" = $_; "State" = "Down"; "Type" = "ManuallySpecifiedMachine" }}
     }
 	
 	
@@ -829,7 +829,7 @@ function Get-NodeList(
 			{
 				if ($NodesToPing[$j].Name -eq $PingResults[$i].Name)
 				{
-					if ($NodesToPing[$j].Type -eq "Machine")
+					if ([bool]($NodesToPing[$j].PSObject.Properties.Name -match "Type")) # Real cluster nodes don't have a "Type" Property
 					{
 						$NodesToPing[$j].State = "Up"
 					}
